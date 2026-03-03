@@ -10,17 +10,17 @@
 
 /* --- CONFIGURATION GÉNÉRALE --- */
 #define SERIAL_BAUD 115200
-#define SEND_FREQUENCY_HIGH 600  // Affichage toutes les 3 secondes
-#define SEND_FREQUENCY_LOW 3600
+#define SEND_FREQUENCY_HIGH 5
+#define SEND_FREQUENCY_LOW 10
 
 /* --- CONFIGURATION PINS --- */
-#define PIN_DS18B20 2
-#define PIN_DHT_INT 19    // DHT Intérieur
-#define PIN_DHT_EXT 18    // DHT Extérieur
-#define PIN_HX711_DOUT 5
-#define PIN_HX711_SCK 4
-#define PIN_ADXL345_INT1 25
-#define TEMOIN_BUZZER 15
+#define PIN_DS18B20 4
+#define PIN_DHT_INT 15    // DHT Intérieur
+#define PIN_DHT_EXT 2    // DHT Extérieur
+#define PIN_HX711_DOUT 33
+#define PIN_HX711_SCK 32
+#define PIN_ADXL345_INT1 13
+#define TEMOIN_BUZZER 34
 #define ADC_BATTERIE 35
 #define SWITCH_ALIM_CAPTEUR 26
 #define SWITCH_ALIM_UC 27
@@ -52,8 +52,13 @@ int send_frequency;
 void setup() {
     Serial.begin(SERIAL_BAUD);
 
+    pinMode(PIN_ADXL345_INT1, INPUT_PULLDOWN);
+
     // Gestion du nombre de boot
     bootCount++;
+
+    Serial.print("Boot numéro: ");
+    Serial.println(bootCount);
 
     // Gestion de la batterie
     pinMode(ADC_BATTERIE, INPUT);
@@ -64,7 +69,7 @@ void setup() {
         // deepsleep imédiat avec interruption toujours active
         Serial.println("batterie critique - sommeil long, deep sleep immédiat");
         send_frequency = SEND_FREQUENCY_LOW;
-        esp_sleep_enable_timer_wakeup(send_frequency * uS_TO_S_FACTOR);
+        esp_sleep_enable_timer_wakeup((uint64_t)send_frequency * uS_TO_S_FACTOR);
         esp_sleep_enable_ext0_wakeup((gpio_num_t)PIN_ADXL345_INT1, 1); 
         esp_deep_sleep_start();
     }
@@ -78,42 +83,20 @@ void setup() {
     }
 
     // Initialisation switch pour alimenter les capteurs + uC
-    pinMode(SWITCH_ALIM_CAPTEUR, OUTPUT);
-    pinMode(SWITCH_ALIM_UC, OUTPUT);
+    //pinMode(SWITCH_ALIM_CAPTEUR, OUTPUT);
+    //pinMode(SWITCH_ALIM_UC, OUTPUT);
 
-    digitalWrite(SWITCH_ALIM_CAPTEUR, LOW);
-    digitalWrite(SWITCH_ALIM_UC, HIGH);
-    delay(500);
+    //digitalWrite(SWITCH_ALIM_CAPTEUR, LOW);
+    //digitalWrite(SWITCH_ALIM_UC, HIGH);
+    //delay(500);
 
     // Initialisation OneWire pour DS18B20
     sensors.begin();
     dsCount = sensors.getDeviceCount();
     float temp_ds18b20[dsCount];
 
-    // Initialisation I2C 
-    Wire.begin(I2C_SDA, I2C_SCL);
-
-    // Initialisation ADXL345
-    /* a faire qu'une fois car:
-        - possède une mémoire
-        - ADXL toujours alimenté donc ne perd pas sa configuration
-    */
-    adxl.powerOn();
-    adxl.setRangeSetting(16);
-    // Detection du TAP pour le debug
-    adxl.setTapDetectionOnXYZ(0, 0, 1);
-    adxl.setTapThreshold(50);
-    adxl.setTapDuration(15);
-    adxl.setFreeFallThreshold(7);
-    adxl.setFreeFallDuration(30);
-    // Activer les interruptions
-    adxl.setImportantInterruptMapping(1, 1, 1, 1, 1);
-    adxl.FreeFallINT(1);
-    adxl.singleTapINT(1);
-
-    bool alerte_chute = 0;
-
     // Initialisation DHT
+    Serial.println("DHT");
     dhtInt.begin();
     dhtExt.begin();
     float temp_dhtInt;
@@ -122,24 +105,54 @@ void setup() {
     float hum_dhtExt;
 
     // Initialisation HX711
-    scale.begin(PIN_HX711_DOUT, PIN_HX711_SCK);
-    scale.set_scale(calibration_factor);
-    float kg_HX711;
+    //Serial.println("HX711");
+    //scale.begin(PIN_HX711_DOUT, PIN_HX711_SCK);
+    //scale.set_scale(calibration_factor);
+    //float kg_HX711;
+
+    //Serial.println("I2C");
+    // Initialisation I2C 
+    Wire.begin(I2C_SDA, I2C_SCL);
+    //delay(200);
+
+    // Initialisation ADXL345
+    /* a faire qu'une fois car:
+        - possède une mémoire
+        - ADXL toujours alimenté donc ne perd pas sa configuration
+    */
+    adxl.powerOn();
+    adxl.setRangeSetting(16);
+    adxl.setSpiBit(0);
+
+    // Detection du TAP pour le debug
+    //adxl.setTapDetectionOnXYZ(0, 0, 1);
+    //adxl.setTapThreshold(20);
+    //adxl.setTapDuration(15);
+    //adxl.setFreeFallThreshold(7);
+    //adxl.setFreeFallDuration(30);
+    //// Activer les interruptions
+    //adxl.setImportantInterruptMapping(1, 1, 1, 1, 1);
+    //adxl.setInterruptLevelBit(0);
+    //adxl.FreeFallINT(1);
+    //adxl.singleTapINT(1);
+
+    bool alerte_chute = 0;
 
     // Initialisation SEN0562
+    //Serial.println("SEN");
     float lux_sen0562;
     
     // Cause de réveil
-    esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+    //esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
 
-    if(wakeup_reason == ESP_SLEEP_WAKEUP_EXT0) {
-        Serial.println("reveil par interruption");
-        byte interrupts = adxl.getInterruptSource();
-        if(adxl.triggered(interrupts, ADXL345_FREE_FALL)) {
-            Serial.println("interruption provenant de l'ADXL");
-            alerte_chute = 1;
-        }
-    }
+    //if(wakeup_reason == ESP_SLEEP_WAKEUP_EXT0) {
+    //    Serial.println("reveil par interruption");
+    //    byte interrupts = adxl.getInterruptSource();
+    //    if(adxl.triggered(interrupts, ADXL345_FREE_FALL)) {
+    //        Serial.println("interruption provenant de l'ADXL");
+    //        alerte_chute = 1;
+    //    }
+    //}
 
     // Premier boot (temoin sonore, tare de la balance)
     if(bootCount == 1) {
@@ -147,30 +160,32 @@ void setup() {
         digitalWrite(TEMOIN_BUZZER, HIGH);
         delay(200);
         digitalWrite(TEMOIN_BUZZER, LOW);
-        scale.tare();
-        hx711_offset = scale.get_offset();
+        //scale.tare();
+        //hx711_offset = scale.get_offset();
     }
     // application du tare hors premier boot
-    scale.tare(hx711_offset);
+    //scale.set_offset(hx711_offset);
 
+    Serial.println("MESURES");
     // Mesures
-    digitalWrite(SWITCH_ALIM_CAPTEUR, LOW);
+    //digitalWrite(SWITCH_ALIM_CAPTEUR, LOW);
+    lireADXL();
     lireDS18B20(temp_ds18b20);
     lireLux(lux_sen0562);
     lireDHT(dhtInt, temp_dhtInt, hum_dhtInt);
     lireDHT(dhtExt, temp_dhtExt, hum_dhtExt);
-    lirePoids(kg_HX711);
-    digitalWrite(SWITCH_ALIM_CAPTEUR, HIGH);
+    //lirePoids(kg_HX711);
+    //digitalWrite(SWITCH_ALIM_CAPTEUR, HIGH);
     // Mesures autres uC
-    digitalWrite(SWITCH_ALIM_UC, LOW);
+    //digitalWrite(SWITCH_ALIM_UC, LOW);
     //...
-    digitalWrite(SWITCH_ALIM_UC, HIGH);
+    //digitalWrite(SWITCH_ALIM_UC, HIGH);
 
     // Envoi LORA
     // Contatenation des alertes + mesures
 
     Serial.println("dodo...");
-    esp_sleep_enable_timer_wakeup(send_frequency * uS_TO_S_FACTOR);
+    esp_sleep_enable_timer_wakeup((uint64_t)send_frequency * uS_TO_S_FACTOR);
     esp_sleep_enable_ext0_wakeup((gpio_num_t)PIN_ADXL345_INT1, 1); 
     esp_deep_sleep_start();
 }
@@ -217,7 +232,7 @@ void lireDHT(DHT &dht, float &temp_dht, float &hum_dht) {
     // Lecture DHT Intérieur
     hum_dht = dht.readHumidity();
     temp_dht = dht.readTemperature();
-    Serial.print("DHT22 INT: ");
+    Serial.print("DHT22:");
     if (!isnan(hum_dht) && !isnan(temp_dht)) {
         Serial.print("Hum "); Serial.print(hum_dht); 
         Serial.print("% | Temp "); Serial.print(temp_dht); Serial.println(" °C");
