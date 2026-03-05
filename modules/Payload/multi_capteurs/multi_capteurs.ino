@@ -5,6 +5,19 @@
 #include <DHT.h>
 #include "HX711.h"
 
+struct __attribute__((packed)) Payload {
+  uint16_t batt;      // 2 octets
+  int16_t  t_i;       // 2 octets (signé, gère le négatif nativement)
+  int16_t  t_0;       // 2 octets
+  int16_t  t_1;       // 2 octets
+  int16_t  t_2;       // 2 octets
+  uint16_t h_i;       // 2 octets
+  uint16_t h;       // 2 octets
+  uint16_t lux;       // 2 octets
+  uint16_t poids;     // 2 octets
+  uint8_t  chute;     // 1 octet
+};
+
 /* --- CONFIGURATION GÉNÉRALE --- */
 #define SERIAL_BAUD 115200    // Augmenté pour l'ESP32
 #define PRINT_INTERVAL 30000 // On envoie toutes les 30 secondes pour LoRaWAN
@@ -62,47 +75,31 @@ void setup() {
 }
 
 void loop() {
+
+  
   unsigned long currentMillis = millis();
 
   if (currentMillis - lastPrintTime >= PRINT_INTERVAL) {
     lastPrintTime = currentMillis;
 
-    // 1. Lecture des valeurs (tes fonctions existantes)
-    float t_i = 0;
-    float t_o = 0;
-    float t_1 = 0;
-    float t_2 = 0;
-    float h_i = 0;
-    float h_o = 0;
-    float p_g = 0;
-    if (p_g < 0) p_g = 0;
+    Payload p;
+    p.batt      = 4100;           // mV
+    p.t_i       = (int16_t)(22.5 * 10); // Envoie 225 (plus simple que +100)
+    p.t_0       = (int16_t)(-5.2 * 10); // Envoie -52 (le signé gère le négatif)
+    p.t_1       = (int16_t)(15.2 * 10); // Envoie -52 (le signé gère le négatif)
+    p.t_2       = (int16_t)(2.2 * 10); // Envoie -52 (le signé gère le négatif)
+    p.h_i       = 65;             // %
+    p.h       = 2;             // %
+    p.lux       = 800;
+    p.poids     = 1250;           // grammes
+    p.chute     = 0;
 
-    // Lecture Lux
-    uint16_t l = 0;
-
-    // 2. Préparation du Payload (Little Endian comme ton Formatter)
-    // On met 0 pour Batterie, Chute, Xiao et Entités
-    uint16_t batt = 0; 
-    uint16_t w = (uint16_t)p_g;
-
-    char payload[45];
-    sprintf(payload, "%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X",
-      batt & 0xFF, (batt >> 8) & 0xFF,   // Octets 0-1
-      fToU(t_i) & 0xFF, (fToU(t_i) >> 8) & 0xFF, // 2-3
-      fToU(t_o) & 0xFF, (fToU(t_o) >> 8) & 0xFF, // 4-5
-      fToU(t_1) & 0xFF, (fToU(t_1) >> 8) & 0xFF, // 6-7
-      fToU(t_2) & 0xFF, (fToU(t_2) >> 8) & 0xFF, // 8-9
-      fToU(h_i) & 0xFF, (h_i > 0 ? (uint16_t)h_i : 0) >> 8, // Simplifié pour Hum
-      fToU(h_o) & 0xFF, (h_o > 0 ? (uint16_t)h_o : 0) >> 8, 
-      l & 0xFF, (l >> 8) & 0xFF,         // Lux 14-15
-      w & 0xFF, (w >> 8) & 0xFF,         // Poids 16-17
-      0x01,                             // Chute 18
-      0x00,                             // Xiao 19
-      0x00,                             // Entité 20
-      0x00                              // Fiabilité 21
-    );
-
-    // 3. Envoi
-    envoyerCommandeAT("AT+CMSGHEX=\"" + String(payload) + "\"");
+    byte* pBytes = (byte*)&p;
+    String hexPayload = "";
+    for (int i = 0; i < sizeof(p); i++) {
+      if (pBytes[i] < 0x10) hexPayload += "0";
+      hexPayload += String(pBytes[i], HEX);
+    }
+    envoyerCommandeAT("AT+CMSGHEX=\"" + hexPayload + "\"");
   }
 }
