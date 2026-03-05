@@ -26,12 +26,6 @@
 float calibration_factor = -30.0;
 
 /* --- INSTANCIATION --- */
-OneWire oneWire(PIN_DS18B20);
-DallasTemperature sensors(&oneWire);
-ADXL345 adxl = ADXL345();
-DHT dhtInt(PIN_DHT_INT, DHT_TYPE);
-DHT dhtExt(PIN_DHT_EXT, DHT_TYPE);
-HX711 scale;
 
 /* --- LORAWAN KEYS --- */
 String devEui = "70B3D57ED0075EA6";
@@ -59,16 +53,6 @@ void setup() {
   Serial.begin(SERIAL_BAUD);
   Serial2.begin(9600, SERIAL_8N1, RXD2, TXD2); // Communication avec LoRa-E5
 
-  sensors.begin();
-  dsCount = sensors.getDeviceCount();
-  Wire.begin(I2C_SDA, I2C_SCL);
-  adxl.powerOn();
-  dhtInt.begin();
-  dhtExt.begin();
-  scale.begin(PIN_HX711_DOUT, PIN_HX711_SCK);
-  scale.set_scale(calibration_factor);
-  scale.tare();
-
   Serial.println("Initialisation LoRaWAN...");
   envoyerCommandeAT("AT+ID=DevEui,\"" + devEui + "\"");
   envoyerCommandeAT("AT+ID=AppEui,\"" + appEui + "\"");
@@ -84,25 +68,17 @@ void loop() {
     lastPrintTime = currentMillis;
 
     // 1. Lecture des valeurs (tes fonctions existantes)
-    sensors.requestTemperatures();
-    float t_i = dhtInt.readTemperature();
-    float t_o = dhtExt.readTemperature();
-    float t_1 = sensors.getTempCByIndex(0);
-    float t_2 = (dsCount > 1) ? sensors.getTempCByIndex(1) : 0;
-    float h_i = dhtInt.readHumidity();
-    float h_o = dhtExt.readHumidity();
-    float p_g = scale.get_units(5);
+    float t_i = 0;
+    float t_o = 0;
+    float t_1 = 0;
+    float t_2 = 0;
+    float h_i = 0;
+    float h_o = 0;
+    float p_g = 0;
     if (p_g < 0) p_g = 0;
 
     // Lecture Lux
     uint16_t l = 0;
-    Wire.beginTransmission(LUX_I2C_ADDR);
-    Wire.write(0x10);
-    if (Wire.endTransmission() == 0) {
-      delay(20);
-      Wire.requestFrom(LUX_I2C_ADDR, 2);
-      if(Wire.available() == 2) l = Wire.read() << 8 | Wire.read();
-    }
 
     // 2. Préparation du Payload (Little Endian comme ton Formatter)
     // On met 0 pour Batterie, Chute, Xiao et Entités
@@ -120,7 +96,7 @@ void loop() {
       fToU(h_o) & 0xFF, (h_o > 0 ? (uint16_t)h_o : 0) >> 8, 
       l & 0xFF, (l >> 8) & 0xFF,         // Lux 14-15
       w & 0xFF, (w >> 8) & 0xFF,         // Poids 16-17
-      0x00,                             // Chute 18
+      0x01,                             // Chute 18
       0x00,                             // Xiao 19
       0x00,                             // Entité 20
       0x00                              // Fiabilité 21
