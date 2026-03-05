@@ -8,17 +8,31 @@
 /* --- CONSTANTES ---*/
 #define uS_TO_S_FACTOR 1000000ULL
 
+/* --- STRUCTURES --- */
+struct __attribute__((packed)) Payload {
+    uint16_t batt;      // 2 octets
+    int16_t  t_i;       // 2 octets (signé, gère le négatif nativement)
+    int16_t  t_0;       // 2 octets
+    int16_t  t_1;       // 2 octets
+    int16_t  t_2;       // 2 octets
+    uint16_t h_i;       // 2 octets
+    uint16_t h;       // 2 octets
+    uint16_t lux;       // 2 octets
+    uint16_t poids;     // 2 octets
+    uint8_t  chute;     // 1 octet
+};
+
 /* --- CONFIGURATION GÉNÉRALE --- */
 #define SERIAL_BAUD 115200
-#define SEND_FREQUENCY_HIGH 5
-#define SEND_FREQUENCY_LOW 10
+#define SEND_FREQUENCY_HIGH 30
+#define SEND_FREQUENCY_LOW 3600
 
 /* --- CONFIGURATION PINS --- */
 #define PIN_DS18B20 4
 #define PIN_DHT_INT 15    // DHT Intérieur
 #define PIN_DHT_EXT 2    // DHT Extérieur
-#define PIN_HX711_DOUT 33
-#define PIN_HX711_SCK 32
+#define PIN_HX711_DOUT 32
+#define PIN_HX711_SCK 33
 #define PIN_ADXL345_INT1 13
 #define TEMOIN_BUZZER 34
 #define ADC_BATTERIE 35
@@ -26,6 +40,8 @@
 #define SWITCH_ALIM_UC 27
 #define I2C_SDA 21
 #define I2C_SCL 22
+#define RXD2 16
+#define TXD2 17
 
 /* --- CONFIGURATION CAPTEURS --- */
 #define DHT_TYPE DHT22
@@ -47,13 +63,21 @@ RTC_DATA_ATTR long hx711_offset = 0;
 uint8_t luxBuf[2];
 int send_frequency;
 
+/* --- VARIABLES GLOBALES POUR LORA --- */
+String devEui = "70B3D57ED0075EA6";
+String appEui = "0000000000000000";
+String appKey = "802C6FEA2C744EC280D61DC102EBC9EE";
+
 /* --- FONCTIONS ---*/
 
 void setup() {
     Serial.begin(SERIAL_BAUD);
+    
+    Payload data; 
 
-    pinMode(PIN_ADXL345_INT1, INPUT_PULLDOWN);
-
+    // LORA
+    Serial2.begin(9600, SERIAL_8N1, RXD2, TXD2);
+    
     // Gestion du nombre de boot
     bootCount++;
 
@@ -90,6 +114,12 @@ void setup() {
     //digitalWrite(SWITCH_ALIM_UC, HIGH);
     //delay(500);
 
+    // Initialisation HX711
+    //Serial.println("HX711");
+    scale.begin(PIN_HX711_DOUT, PIN_HX711_SCK);
+    scale.set_scale(calibration_factor);
+    float kg_HX711;
+
     // Initialisation OneWire pour DS18B20
     sensors.begin();
     dsCount = sensors.getDeviceCount();
@@ -103,12 +133,6 @@ void setup() {
     float hum_dhtInt;
     float temp_dhtExt;
     float hum_dhtExt;
-
-    // Initialisation HX711
-    //Serial.println("HX711");
-    //scale.begin(PIN_HX711_DOUT, PIN_HX711_SCK);
-    //scale.set_scale(calibration_factor);
-    //float kg_HX711;
 
     //Serial.println("I2C");
     // Initialisation I2C 
@@ -160,21 +184,30 @@ void setup() {
         digitalWrite(TEMOIN_BUZZER, HIGH);
         delay(200);
         digitalWrite(TEMOIN_BUZZER, LOW);
-        //scale.tare();
-        //hx711_offset = scale.get_offset();
+
+        envoyerCommandeAT("AT+ID=DevEui,\"" + devEui + "\"");
+        envoyerCommandeAT("AT+ID=AppEui,\"" + appEui + "\"");
+        envoyerCommandeAT("AT+KEY=APPKEY,\"" + appKey + "\"");
+        envoyerCommandeAT("AT+MODE=LWOTAA");
+        envoyerCommandeAT("AT+JOIN");
+        delay(15000);
+
+        scale.tare();
+        hx711_offset = scale.get_offset();
     }
     // application du tare hors premier boot
-    //scale.set_offset(hx711_offset);
+    scale.set_offset(hx711_offset);
 
     Serial.println("MESURES");
     // Mesures
     //digitalWrite(SWITCH_ALIM_CAPTEUR, LOW);
-    lireADXL();
+    Serial.print("Batterie : "); Serial.print(v_dc); Serial.println(" V");
+    //lireADXL();
     lireDS18B20(temp_ds18b20);
     lireLux(lux_sen0562);
     lireDHT(dhtInt, temp_dhtInt, hum_dhtInt);
     lireDHT(dhtExt, temp_dhtExt, hum_dhtExt);
-    //lirePoids(kg_HX711);
+    lirePoids(kg_HX711);
     //digitalWrite(SWITCH_ALIM_CAPTEUR, HIGH);
     // Mesures autres uC
     //digitalWrite(SWITCH_ALIM_UC, LOW);
@@ -183,6 +216,26 @@ void setup() {
 
     // Envoi LORA
     // Contatenation des alertes + mesures
+    data.batt = (int16_t)(v_dc * 100);
+    data.t_i = (int16_t)(temp_dhtInt * 10); // Envoie 225 (plus simple que +100)
+    data.t_0 = (int16_t)(temp_dhtExt * 10); // Envoie -52 (le signé gère le négatif)
+    data.t_1 = (int16_t)(temp_ds18b20[0] * 10); // Envoie -52 (le signé gère le négatif)
+    data.t_2 = (int16_t)(temp_ds18b20[1] * 10); // Envoie -52 (le signé gère le négatif)
+    data.h_i = hum_dhtInt;
+    data.h = hum_dhtExt;
+    data.lux = lux_sen0562;
+    data.poids = kg_HX711;
+    data.chute = alerte_chute;
+
+    byte* pBytes = (byte*)&data;
+    String hexPayload = "";
+    for (int i = 0; i < sizeof(data); i++) {
+      if (pBytes[i] < 0x10) hexPayload += "0";
+      hexPayload += String(pBytes[i], HEX);
+    }
+    envoyerCommandeAT("AT+CMSGHEX=\"" + hexPayload + "\"");
+
+    //envoyerCommandeAT("AT+LOWPOWER");
 
     Serial.println("dodo...");
     esp_sleep_enable_timer_wakeup((uint64_t)send_frequency * uS_TO_S_FACTOR);
@@ -245,4 +298,11 @@ void lirePoids(float &kg_HX711) {
     kg_HX711 = scale.get_units(5); // Moyenne sur 5 lectures
     if (kg_HX711 < 0 && kg_HX711 > -2) kg_HX711 = 0;
     Serial.print("Poids: "); Serial.print(kg_HX711 / 1000.0, 2); Serial.println(" kg");
+}
+
+void envoyerCommandeAT(String cmd) {
+  Serial.print("-> "); Serial.println(cmd);
+  Serial2.print(cmd + "\r\n");
+  delay(1000); 
+  while (Serial2.available()) Serial.write(Serial2.read());
 }
