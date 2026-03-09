@@ -237,9 +237,9 @@ void setup() {
 
     uint16_t valX, valY, valZ;
     lireADXL(valX, valY, valZ);
-    data.x = valX;
-    data.y = valY;
-    data.z = valZ;
+    data.x = valX * 10;
+    data.y = valY * 10;
+    data.z = valZ * 10;
 
     byte* pBytes = (byte*)&data;
     String hexPayload = "";
@@ -247,7 +247,7 @@ void setup() {
       if (pBytes[i] < 0x10) hexPayload += "0";
       hexPayload += String(pBytes[i], HEX);
     }
-    //envoyerCommandeAT("AT+CMSGHEX=\"" + hexPayload + "\"");
+    envoyerCommandeAT("AT+CMSGHEX=\"" + hexPayload + "\"");
 
     //envoyerCommandeAT("AT+LOWPOWER");
 
