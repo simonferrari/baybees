@@ -110,14 +110,15 @@ void setup() {
     }
 
     Serial.println("Alimentation...");
+    gpio_hold_dis((gpio_num_t)SWITCH_ALIM_CAPTEUR);
 
     // Initialisation switch pour alimenter les capteurs + uC
-    //pinMode(SWITCH_ALIM_CAPTEUR, OUTPUT);
+    pinMode(SWITCH_ALIM_CAPTEUR, OUTPUT);
     //pinMode(SWITCH_ALIM_UC, OUTPUT);
 
-    //digitalWrite(SWITCH_ALIM_CAPTEUR, LOW);
+    digitalWrite(SWITCH_ALIM_CAPTEUR, HIGH);
     //digitalWrite(SWITCH_ALIM_UC, HIGH);
-    //delay(10000);
+    delay(10000);
 
     // Initialisation HX711
     //Serial.println("HX711");
@@ -216,7 +217,7 @@ void setup() {
     lireDHT(dhtInt, temp_dhtInt, hum_dhtInt);
     lireDHT(dhtExt, temp_dhtExt, hum_dhtExt);
     lirePoids(kg_HX711);
-    //digitalWrite(SWITCH_ALIM_CAPTEUR, HIGH);
+    //digitalWrite(SWITCH_ALIM_CAPTEUR, LOW);
     // Mesures autres uC
     //digitalWrite(SWITCH_ALIM_UC, LOW);
     //...
@@ -247,9 +248,12 @@ void setup() {
       if (pBytes[i] < 0x10) hexPayload += "0";
       hexPayload += String(pBytes[i], HEX);
     }
-    //envoyerCommandeAT("AT+CMSGHEX=\"" + hexPayload + "\"");
+    envoyerCommandeAT("AT+CMSGHEX=\"" + hexPayload + "\"");
 
     //envoyerCommandeAT("AT+LOWPOWER");
+    digitalWrite(SWITCH_ALIM_CAPTEUR, LOW);
+    delay(10);
+    gpio_hold_en((gpio_num_t)SWITCH_ALIM_CAPTEUR);
 
     adxl.getInterruptSource();
 
