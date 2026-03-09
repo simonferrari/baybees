@@ -34,7 +34,7 @@ struct __attribute__((packed)) Payload {
 #define PIN_HX711_DOUT 32
 #define PIN_HX711_SCK 33
 #define PIN_ADXL345_INT1 13
-#define TEMOIN_BUZZER 34
+#define TEMOIN_BUZZER 19
 #define ADC_BATTERIE 35
 #define SWITCH_ALIM_CAPTEUR 26
 #define SWITCH_ALIM_UC 27
@@ -106,13 +106,15 @@ void setup() {
         send_frequency = SEND_FREQUENCY_HIGH; 
     }
 
+    Serial.println("Alimentation...");
+
     // Initialisation switch pour alimenter les capteurs + uC
     //pinMode(SWITCH_ALIM_CAPTEUR, OUTPUT);
     //pinMode(SWITCH_ALIM_UC, OUTPUT);
 
     //digitalWrite(SWITCH_ALIM_CAPTEUR, LOW);
     //digitalWrite(SWITCH_ALIM_UC, HIGH);
-    //delay(500);
+    //delay(10000);
 
     // Initialisation HX711
     //Serial.println("HX711");
@@ -126,7 +128,7 @@ void setup() {
     float temp_ds18b20[dsCount];
 
     // Initialisation DHT
-    Serial.println("DHT");
+    //Serial.println("DHT");
     dhtInt.begin();
     dhtExt.begin();
     float temp_dhtInt;
@@ -180,6 +182,7 @@ void setup() {
 
     // Premier boot (temoin sonore, tare de la balance)
     if(bootCount == 1) {
+        pinMode(TEMOIN_BUZZER, OUTPUT);
         Serial.println("Premier boot");
         digitalWrite(TEMOIN_BUZZER, HIGH);
         delay(200);
@@ -200,7 +203,6 @@ void setup() {
 
     Serial.println("MESURES");
     // Mesures
-    //digitalWrite(SWITCH_ALIM_CAPTEUR, LOW);
     Serial.print("Batterie : "); Serial.print(v_dc); Serial.println(" V");
     //lireADXL();
     lireDS18B20(temp_ds18b20);
@@ -233,11 +235,12 @@ void setup() {
       if (pBytes[i] < 0x10) hexPayload += "0";
       hexPayload += String(pBytes[i], HEX);
     }
-    envoyerCommandeAT("AT+CMSGHEX=\"" + hexPayload + "\"");
+    //envoyerCommandeAT("AT+CMSGHEX=\"" + hexPayload + "\"");
 
     //envoyerCommandeAT("AT+LOWPOWER");
 
     Serial.println("dodo...");
+
     esp_sleep_enable_timer_wakeup((uint64_t)send_frequency * uS_TO_S_FACTOR);
     esp_sleep_enable_ext0_wakeup((gpio_num_t)PIN_ADXL345_INT1, 1); 
     esp_deep_sleep_start();
