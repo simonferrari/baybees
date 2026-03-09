@@ -267,7 +267,7 @@ static void doMeasurementCycle() {
   Serial.println("[CYCLE] Debut cycle mesure");
 
   // 1) Allumer le XIAO via Pololu
-  pololuOn();
+  //pololuOn();
 
   // 2) Attendre son boot
   Serial.printf("[CYCLE] Attente boot XIAO: %lu ms\n", (unsigned long)XIAO_BOOT_MS);
@@ -290,7 +290,7 @@ static void doMeasurementCycle() {
   delay(AFTER_SEND_OFF_MS);
 
   // 4) Couper le XIAO
-  pololuOff();
+  //pololuOff();
 
   Serial.println("[CYCLE] Fin cycle mesure");
   Serial.println("======================================");

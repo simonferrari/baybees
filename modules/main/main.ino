@@ -23,6 +23,9 @@ struct __attribute__((packed)) Payload {
     uint16_t x; //2 octets
     uint16_t y; //2 octets
     uint16_t z; //2 octets
+    uint8_t frelon;
+    uint8_t nb_frelon;
+    uint8_t frelon_acc;
 };
 
 /* --- CONFIGURATION GÉNÉRALE --- */
@@ -221,6 +224,11 @@ void setup() {
     // Mesures autres uC
     //digitalWrite(SWITCH_ALIM_UC, LOW);
     //...
+
+    // doMeasurmentCycle
+    // data.frelon = ...
+    //
+
     //digitalWrite(SWITCH_ALIM_UC, HIGH);
 
     // Envoi LORA
@@ -331,3 +339,4 @@ void envoyerCommandeAT(String cmd) {
   delay(1000); 
   while (Serial2.available()) Serial.write(Serial2.read());
 }
+
