@@ -20,6 +20,9 @@ struct __attribute__((packed)) Payload {
     uint16_t lux;       // 2 octets
     uint16_t poids;     // 2 octets
     uint8_t  chute;     // 1 octet
+    uint16_t x; //2 octets
+    uint16_t y; //2 octets
+    uint16_t z; //2 octets
 };
 
 /* --- CONFIGURATION GÉNÉRALE --- */
@@ -151,16 +154,20 @@ void setup() {
     adxl.setSpiBit(0);
 
     // Detection du TAP pour le debug
-    //adxl.setTapDetectionOnXYZ(0, 0, 1);
-    //adxl.setTapThreshold(20);
-    //adxl.setTapDuration(15);
-    //adxl.setFreeFallThreshold(7);
-    //adxl.setFreeFallDuration(30);
-    //// Activer les interruptions
+    adxl.setTapDetectionOnXYZ(0, 0, 1);
+    adxl.setTapThreshold(10);
+    adxl.setTapDuration(10);
+    adxl.setFreeFallThreshold(7);
+    adxl.setFreeFallDuration(30);
+    // Activer les interruptions
+    //pinMode(PIN_ADXL345_INT1, INPUT);
     //adxl.setImportantInterruptMapping(1, 1, 1, 1, 1);
     //adxl.setInterruptLevelBit(0);
     //adxl.FreeFallINT(1);
     //adxl.singleTapINT(1);
+    //attachInterrupt(digitalPinToInterrupt(13), setup, RISING);
+
+    //byte interrupts = adxl.getInterruptSource();
 
     bool alerte_chute = 0;
 
@@ -170,11 +177,10 @@ void setup() {
     
     // Cause de réveil
     //esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
-
     //if(wakeup_reason == ESP_SLEEP_WAKEUP_EXT0) {
     //    Serial.println("reveil par interruption");
     //    byte interrupts = adxl.getInterruptSource();
-    //    if(adxl.triggered(interrupts, ADXL345_FREE_FALL)) {
+    //    if(adxl.triggered(interrupts, ADXL345_FREE_FALL) || adxl.triggered(interrupts, ADXL345_SINGLE_TAP)) {
     //        Serial.println("interruption provenant de l'ADXL");
     //        alerte_chute = 1;
     //    }
@@ -229,6 +235,12 @@ void setup() {
     data.poids = kg_HX711;
     data.chute = alerte_chute;
 
+    uint16_t valX, valY, valZ;
+    lireADXL(valX, valY, valZ);
+    data.x = valX;
+    data.y = valY;
+    data.z = valZ;
+
     byte* pBytes = (byte*)&data;
     String hexPayload = "";
     for (int i = 0; i < sizeof(data); i++) {
@@ -238,6 +250,8 @@ void setup() {
     //envoyerCommandeAT("AT+CMSGHEX=\"" + hexPayload + "\"");
 
     //envoyerCommandeAT("AT+LOWPOWER");
+
+    adxl.getInterruptSource();
 
     Serial.println("dodo...");
 
@@ -260,13 +274,17 @@ void lireDS18B20(float* temp_ds18b20) {
     }  
 }
 
-void lireADXL() {
-    int x, y, z;
-    adxl.readAccel(&x, &y, &z);
+void lireADXL(uint16_t &x, uint16_t &y, uint16_t &z) {
+    int ax, ay, az; // Variables temporaires en int (32 bits)
+    adxl.readAccel(&ax, &ay, &az); // On passe les adresses
+    x = (uint16_t)ax; // On cast pour la structure
+    y = (uint16_t)ay;
+    z = (uint16_t)az;
+    
     Serial.print("Accel XYZ: ");
-    Serial.print(x); Serial.print(", ");
-    Serial.print(y); Serial.print(", ");
-    Serial.println(z);
+    Serial.print(ax); Serial.print(", ");
+    Serial.print(ay); Serial.print(", ");
+    Serial.println(az);
 }
 
 void lireLux(float &lux_SEN0562) {
