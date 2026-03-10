@@ -26,6 +26,8 @@ struct __attribute__((packed)) Payload {
     uint8_t frelon;
     uint8_t nb_frelon;
     uint8_t frelon_acc;
+    uint8_t audio_classe;
+    uint8_t audio_conf;
 };
 
 /* --- CONFIGURATION GÉNÉRALE --- */
@@ -52,6 +54,22 @@ struct __attribute__((packed)) Payload {
 /* --- CONFIGURATION CAPTEURS --- */
 #define DHT_TYPE DHT22
 #define LUX_I2C_ADDR 0x23
+
+// Adresse I2C Nano
+#define NANO_I2C_ADDR   0x08
+
+// Codes classes audio reçus de la Nano
+#define AUDIO_BEEQUEEN  0
+#define AUDIO_HORNET    1
+#define AUDIO_NOBEE     2
+#define AUDIO_NOQUEEN   3
+#define AUDIO_PIPING    4
+#define AUDIO_INCONNU   255
+
+// Mémoire RTC entre les boots
+RTC_DATA_ATTR uint8_t last_audio_classe = 0;
+RTC_DATA_ATTR uint8_t last_audio_conf   = 0;
+
 float calibration_factor = -29.0;
 
 /* --- INSTANCIATION --- */
@@ -225,9 +243,11 @@ void setup() {
     //digitalWrite(SWITCH_ALIM_UC, LOW);
     //...
 
-    // doMeasurmentCycle
-    // data.frelon = ...
-    //
+    // ── Lecture IA audio Nano 33 BLE (I2C) ──
+    uint8_t val_audio_classe = 0, val_audio_conf = 0;
+    lireNano(val_audio_classe, val_audio_conf);
+    data.audio_classe = val_audio_classe;
+    data.audio_conf   = val_audio_conf;
 
     //digitalWrite(SWITCH_ALIM_UC, HIGH);
 
@@ -340,3 +360,19 @@ void envoyerCommandeAT(String cmd) {
   while (Serial2.available()) Serial.write(Serial2.read());
 }
 
+void lireNano(uint8_t &audio_classe, uint8_t &audio_conf) {
+    uint8_t nb = Wire.requestFrom(NANO_I2C_ADDR, 2);
+    if (nb == 2) {
+        audio_classe = Wire.read();
+        audio_conf   = Wire.read();
+        last_audio_classe = audio_classe;
+        last_audio_conf   = audio_conf;
+        Serial.print("[NANO] classe="); Serial.print(audio_classe);
+        Serial.print(" conf=");         Serial.print(audio_conf);
+        Serial.println("%");
+    } else {
+        Serial.println("[NANO] Pas de réponse — valeurs précédentes conservées");
+        audio_classe = last_audio_classe;
+        audio_conf   = last_audio_conf;
+    }
+}
