@@ -1,253 +1,522 @@
 #include <Arduino.h>
+#include <Wire.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <SparkFun_ADXL345.h>
+#include <DHT.h>
+#include "HX711.h"
+#include <math.h>
 
-/*
-  uPesy ESP32-WROOM
-  - Serial  : debug USB
-  - Serial2 : RX 3 bytes depuis XIAO   RX=GPIO21  TX=GPIO22 (optionnel)
-  - Serial1 : AT vers LoRa-E5          RX=GPIO16  TX=GPIO17
-*/
+/* --- CONSTANTES --- */
+#define uS_TO_S_FACTOR 1000000ULL
 
-// =====================
-// XIAO -> uPesy (Serial2)
-// =====================
-static const uint32_t LINK_BAUD = 115200;
-static const int XIAO_RX_PIN = 21;  // uPesy RX2 <- XIAO TX
-static const int XIAO_TX_PIN = 22;  // uPesy TX2 -> XIAO RX (optionnel)
+/* --- STRUCTURES --- */
+struct __attribute__((packed)) Payload {
+    uint16_t batt;        // 2 octets
+    int16_t  t_i;         // 2 octets
+    int16_t  t_0;         // 2 octets
+    int16_t  t_1;         // 2 octets
+    int16_t  t_2;         // 2 octets
+    uint16_t h_i;         // 2 octets
+    uint16_t h;           // 2 octets
+    uint16_t lux;         // 2 octets
+    uint16_t poids;       // 2 octets
+    uint8_t  chute;       // 1 octet
+    int16_t  x;           // 2 octets
+    int16_t  y;           // 2 octets
+    int16_t  z;           // 2 octets
+    uint8_t  frelon;      // venant du XIAO
+    uint8_t  nb_frelon;   // venant du XIAO
+    uint8_t  frelon_acc;  // venant du XIAO
+    uint8_t  audio_classe;
+    uint8_t  audio_conf;
+};
 
-static uint8_t rx_buf[3];
-static uint8_t rx_idx = 0;
-static uint32_t last_byte_ms = 0;
-static const uint32_t RX_TIMEOUT_MS = 50;
+/* --- CONFIGURATION GÉNÉRALE --- */
+#define SERIAL_BAUD         115200
+#define SEND_FREQUENCY_HIGH 30
+#define SEND_FREQUENCY_LOW  3600
 
-static const bool DROP_ALL_ZERO_PACKET = true;
+/* --- CONFIGURATION PINS --- */
+#define PIN_DS18B20         4
+#define PIN_DHT_INT         15
+#define PIN_DHT_EXT         2
+#define PIN_HX711_DOUT      32
+#define PIN_HX711_SCK       33
+#define PIN_ADXL345_INT1    13
+#define TEMOIN_BUZZER       19
+#define ADC_BATTERIE        35
+#define SWITCH_ALIM_CAPTEUR 26
+#define SWITCH_ALIM_UC      27
+#define I2C_SDA             21
+#define I2C_SCL             22
+#define RXD2                16
+#define TXD2                17
 
-static bool is_plausible_packet(uint8_t type, uint8_t count, uint8_t conf) {
-  if (type < 1 || type > 10) return false; // adapte si besoin
-  if (count > 200) return false;
-  if (conf > 100) return false;
-  return true;
-}
+/* --- CONFIGURATION CAPTEURS --- */
+#define DHT_TYPE      DHT22
+#define LUX_I2C_ADDR  0x23
 
-// =====================
-// LoRa-E5 (Serial1)
-// =====================
-static const int LORAE5_RX_PIN = 16;
-static const int LORAE5_TX_PIN = 17;
-static const uint32_t LORAE5_BAUD = 9600;
+/* --- I2C AUTRES UC --- */
+#define NANO_I2C_ADDR 0x08
+#define XIAO_I2C_ADDR 0x12
 
-// TTN OTAA
-static const char* DEV_EUI = "70B3D57ED0073206";   // attention: ton code "qui marche" utilise ça
-static const char* APP_EUI = "0000000000000000";
-static const char* APP_KEY = "FE7BB9E5F461932685E0C59807BC8852";
+/* --- CODES AUDIO --- */
+#define AUDIO_BEEQUEEN  0
+#define AUDIO_HORNET    1
+#define AUDIO_NOBEE     2
+#define AUDIO_NOQUEEN   3
+#define AUDIO_PIPING    4
+#define AUDIO_INCONNU   255
 
-static bool g_joined = false;
-static uint32_t last_join_try_ms = 0;
-static const uint32_t REJOIN_PERIOD_MS = 30000;
+/* --- MÉMOIRE RTC ENTRE LES BOOTS --- */
+RTC_DATA_ATTR int      bootCount         = 0;
+RTC_DATA_ATTR long     hx711_offset      = 0;
+RTC_DATA_ATTR uint8_t  last_audio_classe = AUDIO_INCONNU;
+RTC_DATA_ATTR uint8_t  last_audio_conf   = 0;
+RTC_DATA_ATTR uint8_t  last_frelon       = 0;
+RTC_DATA_ATTR uint8_t  last_nb_frelon    = 0;
+RTC_DATA_ATTR uint8_t  last_frelon_acc   = 0;
 
-// ===== Helpers type "code qui marche" =====
+/* --- VARIABLES GLOBALES --- */
+float calibration_factor = -29.0;
+int   dsCount            = 0;
+int   send_frequency     = SEND_FREQUENCY_HIGH;
 
-static String readAll(Stream& s, uint32_t waitMs = 30) {
-  String out;
-  uint32_t t0 = millis();
-  while (millis() - t0 < waitMs) {
-    while (s.available()) {
-      out += (char)s.read();
-      t0 = millis(); // reset timeout dès qu'on lit
-    }
-    delay(1);
-  }
-  return out;
-}
+/* --- LORA --- */
+String devEui = "70B3D57ED0073206";
+String appEui = "0000000000000000";
+String appKey = "FE7BB9E5F461932685E0C59807BC8852";
 
-static String loraCmd(const String& cmd, uint32_t waitMs = 600) {
-  Serial1.print(cmd);
-  Serial1.print("\r\n");
-  String r = readAll(Serial1, waitMs);
+/* --- INSTANCIATION --- */
+OneWire oneWire(PIN_DS18B20);
+DallasTemperature sensors(&oneWire);
+ADXL345 adxl = ADXL345();
+DHT dhtInt(PIN_DHT_INT, DHT_TYPE);
+DHT dhtExt(PIN_DHT_EXT, DHT_TYPE);
+HX711 scale;
 
-  if (r.length()) {
-    Serial.printf("[E5] %s -> %s\n", cmd.c_str(), r.c_str());
-  } else {
-    Serial.printf("[E5] %s -> (no response)\n", cmd.c_str());
-  }
-  return r;
-}
+/* --- PROTOTYPES --- */
+void envoyerCommandeAT(const String &cmd);
+void lireDS18B20(float* temp_ds18b20, int maxCount);
+void lireADXL(int16_t &x, int16_t &y, int16_t &z);
+void lireLux(float &lux_SEN0562);
+void lireDHT(DHT &dht, float &temp_dht, float &hum_dht);
+void lirePoids(float &kg_HX711);
+void lireNano(uint8_t &audio_classe, uint8_t &audio_conf);
+void lireXIAO(uint8_t &frelon, uint8_t &nb_frelon, uint8_t &frelon_acc);
+String payloadToHex(const Payload &data);
+int16_t  floatToTemp10(float v);
+uint16_t floatToU16(float v);
 
-static String toHex3(uint8_t a, uint8_t b, uint8_t c) {
-  char buf[7];
-  snprintf(buf, sizeof(buf), "%02X%02X%02X", a, b, c);
-  return String(buf);
-}
-
-// JOIN comme ton code qui marche, mais corrigé (Done != success)
-static bool loraJoin() {
-  Serial.println("[E5] Tentative de JOIN OTAA...");
-
-  loraCmd("AT", 800);
-  loraCmd("AT+MODE=LWOTAA", 800);
-  loraCmd("AT+DR=EU868", 800);
-
-  // Ton code qui marche fait DR=5 + ADR
-  loraCmd("AT+DR=5", 800);
-  loraCmd("AT+ADR=ON", 800);
-
-  // Même syntaxe que ton code qui marche (SANS guillemets)
-  loraCmd(String("AT+ID=DevEui,") + DEV_EUI, 800);
-  loraCmd(String("AT+ID=AppEui,") + APP_EUI, 800);
-  loraCmd(String("AT+KEY=APPKEY,") + APP_KEY, 1000);
-
-  loraCmd("AT+CLASS=A", 800);
-  loraCmd("AT+PORT=2", 800);
-
-  // Lance JOIN et écoute longtemps
-  loraCmd("AT+JOIN", 500);
-
-  uint32_t t0 = millis();
-  String buf;
-
-  bool fail = false;
-  bool success = false;
-
-  while (millis() - t0 < 20000) { // 20 s
-    buf += readAll(Serial1, 300);
-    if (buf.length()) {
-      Serial.printf("[E5 RESP] %s\n", buf.c_str());
-
-      if (buf.indexOf("Join failed") >= 0 || buf.indexOf("failed") >= 0) {
-        fail = true;
-      }
-      if (buf.indexOf("Joined successfully") >= 0 ||
-          buf.indexOf("Network joined") >= 0 ||
-          buf.indexOf("accepted") >= 0) {
-        success = true;
-      }
-
-      // fin de procédure
-      if (buf.indexOf("+JOIN: Done") >= 0 || buf.indexOf("Done") >= 0) {
-        break;
-      }
-
-      // évite que buf grossisse trop
-      if (buf.length() > 1200) buf.remove(0, 600);
-    }
-  }
-
-  if (fail || !success) {
-    Serial.println("[E5] Join KO");
-    g_joined = false;
-    return false;
-  }
-
-  Serial.println("[E5] Join OK");
-  g_joined = true;
-  return true;
-}
-
-static bool loraSend3Bytes(uint8_t type, uint8_t count, uint8_t conf) {
-  String hex = toHex3(type, count, conf);
-  String cmd = "AT+MSGHEX=\"" + hex + "\"";
-
-  String resp = loraCmd(cmd, 4000);
-
-  // "Done" sans "ERROR"
-  bool ok = (resp.indexOf("Done") >= 0 || resp.indexOf("Tx") >= 0 || resp.indexOf("OK") >= 0) &&
-            (resp.indexOf("ERROR") < 0) &&
-            (resp.indexOf("Please join network first") < 0);
-
-  Serial.printf("[E5] uplink %s\n", ok ? "OK" : "FAIL");
-  return ok;
-}
-
-// ===================== RX helper =====================
-static void reset_rx(const char* why) {
-  rx_idx = 0;
-  if (why) {
-    Serial.print("[uPesy] RX reset: ");
-    Serial.println(why);
-  }
-}
-
-// ===================== Arduino =====================
+/* -------------------------------------------------------------------------- */
+/*                                   SETUP                                    */
+/* -------------------------------------------------------------------------- */
 void setup() {
-  Serial.begin(115200);
-  delay(300);
+    Serial.begin(SERIAL_BAUD);
+    delay(500);
 
-  Serial.println();
-  Serial.println("[uPesy] Start (XIAO->Serial2 GPIO21/22, LoRaE5->Serial1 GPIO16/17)");
+    Serial.println();
+    Serial.println("====================================");
+    Serial.println("[uPesy] Boot");
+    Serial.println("====================================");
 
-  // UART XIAO
-  Serial2.begin(LINK_BAUD, SERIAL_8N1, XIAO_RX_PIN, XIAO_TX_PIN);
-  Serial.printf("[uPesy] Serial2 XIAO  RX=%d TX=%d @%lu\n",
-                XIAO_RX_PIN, XIAO_TX_PIN, (unsigned long)LINK_BAUD);
+    Payload data = {};   // IMPORTANT : tout initialiser à 0
 
-  // UART LoRa-E5
-  Serial1.begin(LORAE5_BAUD, SERIAL_8N1, LORAE5_RX_PIN, LORAE5_TX_PIN);
-  Serial.printf("[uPesy] Serial1 LoRaE5 RX=%d TX=%d @%lu\n",
-                LORAE5_RX_PIN, LORAE5_TX_PIN, (unsigned long)LORAE5_BAUD);
+    // LORA-E5
+    Serial2.begin(9600, SERIAL_8N1, RXD2, TXD2);
 
-  delay(500);
-  reset_rx("init");
+    // Gestion du nombre de boot
+    bootCount++;
+    Serial.print("[uPesy] Boot numero: ");
+    Serial.println(bootCount);
 
-  // 3 tentatives join au boot
-  for (int i = 1; i <= 3 && !g_joined; i++) {
-    Serial.printf("[uPesy] Join attempt %d/3\n", i);
-    loraJoin();
-    delay(1500);
-  }
-  last_join_try_ms = millis();
+    // Gestion batterie
+    pinMode(ADC_BATTERIE, INPUT);
+    float v_mes = analogRead(ADC_BATTERIE);
+    float v_dc  = 1.435f * (v_mes / 4095.0f) * 3.3f;
 
-  if (!g_joined) {
-    Serial.println("[WARN] Pas joint à TTN (pour l'instant). Je retenterai périodiquement.");
-  }
+    Serial.print("[uPesy] Batterie mesuree: ");
+    Serial.print(v_dc, 3);
+    Serial.println(" V");
+
+    if (v_dc < 3.4f) {
+        Serial.println("[uPesy] Batterie critique -> sommeil long immediat");
+        send_frequency = SEND_FREQUENCY_LOW;
+        esp_sleep_enable_timer_wakeup((uint64_t)send_frequency * uS_TO_S_FACTOR);
+        esp_sleep_enable_ext0_wakeup((gpio_num_t)PIN_ADXL345_INT1, 1);
+        esp_deep_sleep_start();
+    }
+    else if (v_dc < 3.7f) {
+        Serial.println("[uPesy] Batterie faible -> sommeil long");
+        send_frequency = SEND_FREQUENCY_LOW;
+    }
+    else {
+        Serial.println("[uPesy] Batterie OK -> sommeil court");
+        send_frequency = SEND_FREQUENCY_HIGH;
+    }
+
+    // Alimentation cartes/capteurs
+    Serial.println("[uPesy] Alimentation...");
+    gpio_hold_dis((gpio_num_t)SWITCH_ALIM_CAPTEUR);
+    gpio_hold_dis((gpio_num_t)SWITCH_ALIM_UC);
+
+    pinMode(SWITCH_ALIM_CAPTEUR, OUTPUT);
+    pinMode(SWITCH_ALIM_UC, OUTPUT);
+
+    digitalWrite(SWITCH_ALIM_CAPTEUR, HIGH);
+    digitalWrite(SWITCH_ALIM_UC, HIGH);
+
+    Serial.println("[uPesy] Alimentation capteurs + uC ON");
+    delay(10000); // temps de boot XIAO + camera + inference
+
+    // I2C
+    Wire.begin(I2C_SDA, I2C_SCL, 100000);
+    Serial.printf("[uPesy] I2C master pret SDA=%d SCL=%d\n", I2C_SDA, I2C_SCL);
+
+    // Initialisation HX711
+    // scale.begin(PIN_HX711_DOUT, PIN_HX711_SCK);
+    // scale.set_scale(calibration_factor);
+
+    // Initialisation DS18B20
+    sensors.begin();
+    dsCount = sensors.getDeviceCount();
+    Serial.print("[uPesy] Nombre DS18B20 detectes: ");
+    Serial.println(dsCount);
+
+    float temp_ds18b20[2] = {NAN, NAN};
+
+    // Initialisation DHT
+    dhtInt.begin();
+    dhtExt.begin();
+    float temp_dhtInt = NAN;
+    float hum_dhtInt  = NAN;
+    float temp_dhtExt = NAN;
+    float hum_dhtExt  = NAN;
+
+    // Initialisation ADXL345
+    adxl.powerOn();
+    adxl.setRangeSetting(16);
+    adxl.setSpiBit(0);
+
+    adxl.setTapDetectionOnXYZ(0, 0, 1);
+    adxl.setTapThreshold(10);
+    adxl.setTapDuration(10);
+    adxl.setFreeFallThreshold(7);
+    adxl.setFreeFallDuration(30);
+
+    bool alerte_chute = 0;
+
+    // Initialisation lux
+    float lux_sen0562 = NAN;
+
+    // Premier boot : buzzer + join LoRa
+    if (bootCount == 1) {
+        pinMode(TEMOIN_BUZZER, OUTPUT);
+        Serial.println("[uPesy] Premier boot");
+
+        digitalWrite(TEMOIN_BUZZER, HIGH);
+        delay(200);
+        digitalWrite(TEMOIN_BUZZER, LOW);
+
+        envoyerCommandeAT("AT");
+        envoyerCommandeAT("AT+ID=DevEui,\"" + devEui + "\"");
+        envoyerCommandeAT("AT+ID=AppEui,\"" + appEui + "\"");
+        envoyerCommandeAT("AT+KEY=APPKEY,\"" + appKey + "\"");
+        envoyerCommandeAT("AT+MODE=LWOTAA");
+        envoyerCommandeAT("AT+JOIN");
+        delay(15000);
+
+        // scale.tare();
+        // hx711_offset = scale.get_offset();
+    }
+
+    // Hors premier boot
+    // scale.set_offset(hx711_offset);
+
+    Serial.println("[uPesy] MESURES");
+
+    // Mesures locales
+    Serial.print("[uPesy] Batterie : ");
+    Serial.print(v_dc, 3);
+    Serial.println(" V");
+
+    lireDS18B20(temp_ds18b20, 2);
+    lireLux(lux_sen0562);
+    lireDHT(dhtInt, temp_dhtInt, hum_dhtInt);
+    lireDHT(dhtExt, temp_dhtExt, hum_dhtExt);
+
+    // float kg_HX711 = 0.0f;
+    // lirePoids(kg_HX711);
+
+    int16_t ax = 0, ay = 0, az = 0;
+    lireADXL(ax, ay, az);
+
+    // Lecture Nano audio
+    uint8_t val_audio_classe = AUDIO_INCONNU;
+    uint8_t val_audio_conf   = 0;
+    lireNano(val_audio_classe, val_audio_conf);
+
+    // Lecture XIAO vision
+    uint8_t val_frelon     = 0;
+    uint8_t val_nb_frelon  = 0;
+    uint8_t val_frelon_acc = 0;
+    lireXIAO(val_frelon, val_nb_frelon, val_frelon_acc);
+
+    // Remplissage payload
+    data.batt        = floatToU16(v_dc * 100.0f);
+    data.t_i         = floatToTemp10(temp_dhtInt);
+    data.t_0         = floatToTemp10(temp_dhtExt);
+    data.t_1         = floatToTemp10(temp_ds18b20[0]);
+    data.t_2         = floatToTemp10(temp_ds18b20[1]);
+    data.h_i         = floatToU16(hum_dhtInt);
+    data.h           = floatToU16(hum_dhtExt);
+    data.lux         = floatToU16(lux_sen0562);
+    data.poids       = 0; // ou floatToU16(kg_HX711) si HX711 activé
+    data.chute       = alerte_chute ? 1 : 0;
+    data.x           = ax;
+    data.y           = ay;
+    data.z           = az;
+    data.frelon      = val_frelon;
+    data.nb_frelon   = val_nb_frelon;
+    data.frelon_acc  = val_frelon_acc;
+    data.audio_classe= val_audio_classe;
+    data.audio_conf  = val_audio_conf;
+
+    // Affichage payload
+    Serial.println("[uPesy] Payload rempli :");
+    Serial.print("  batt       = "); Serial.println(data.batt);
+    Serial.print("  t_i        = "); Serial.println(data.t_i);
+    Serial.print("  t_0        = "); Serial.println(data.t_0);
+    Serial.print("  t_1        = "); Serial.println(data.t_1);
+    Serial.print("  t_2        = "); Serial.println(data.t_2);
+    Serial.print("  h_i        = "); Serial.println(data.h_i);
+    Serial.print("  h          = "); Serial.println(data.h);
+    Serial.print("  lux        = "); Serial.println(data.lux);
+    Serial.print("  poids      = "); Serial.println(data.poids);
+    Serial.print("  chute      = "); Serial.println(data.chute);
+    Serial.print("  x          = "); Serial.println(data.x);
+    Serial.print("  y          = "); Serial.println(data.y);
+    Serial.print("  z          = "); Serial.println(data.z);
+    Serial.print("  frelon     = "); Serial.println(data.frelon);
+    Serial.print("  nb_frelon  = "); Serial.println(data.nb_frelon);
+    Serial.print("  frelon_acc = "); Serial.println(data.frelon_acc);
+    Serial.print("  audio_cls  = "); Serial.println(data.audio_classe);
+    Serial.print("  audio_conf = "); Serial.println(data.audio_conf);
+
+    // Conversion HEX
+    String hexPayload = payloadToHex(data);
+    Serial.print("[uPesy] HEX payload = ");
+    Serial.println(hexPayload);
+
+    // Envoi LoRaWAN
+    envoyerCommandeAT("AT+CMSGHEX=\"" + hexPayload + "\"");
+
+    // Extinction alimentation
+    digitalWrite(SWITCH_ALIM_CAPTEUR, LOW);
+    digitalWrite(SWITCH_ALIM_UC, LOW);
+    delay(10);
+
+    gpio_hold_en((gpio_num_t)SWITCH_ALIM_CAPTEUR);
+    gpio_hold_en((gpio_num_t)SWITCH_ALIM_UC);
+
+    adxl.getInterruptSource();
+
+    Serial.println("[uPesy] dodo...");
+
+    esp_sleep_enable_timer_wakeup((uint64_t)send_frequency * uS_TO_S_FACTOR);
+    esp_sleep_enable_ext0_wakeup((gpio_num_t)PIN_ADXL345_INT1, 1);
+    esp_deep_sleep_start();
 }
 
-void loop() {
-  // rejoin périodique (sans bloquer la réception XIAO)
-  if (!g_joined && (millis() - last_join_try_ms) > REJOIN_PERIOD_MS) {
-    last_join_try_ms = millis();
-    Serial.println("[uPesy] Re-join attempt...");
-    loraJoin();
-  }
+void loop() {}
 
-  // resync si paquet incomplet
-  if (rx_idx > 0 && (millis() - last_byte_ms) > RX_TIMEOUT_MS) {
-    reset_rx("timeout");
-  }
+/* -------------------------------------------------------------------------- */
+/*                                  FONCTIONS                                 */
+/* -------------------------------------------------------------------------- */
 
-  while (Serial2.available() > 0) {
-    int b = Serial2.read();
-    if (b < 0) break;
+void lireDS18B20(float* temp_ds18b20, int maxCount) {
+    sensors.requestTemperatures();
 
-    last_byte_ms = millis();
-    rx_buf[rx_idx++] = (uint8_t)b;
+    int countToRead = dsCount < maxCount ? dsCount : maxCount;
 
-    if (rx_idx == 3) {
-      uint8_t type  = rx_buf[0];
-      uint8_t count = rx_buf[1];
-      uint8_t conf  = rx_buf[2];
-
-      if (DROP_ALL_ZERO_PACKET && type == 0 && count == 0 && conf == 0) {
-        Serial.println("[uPesy] Drop packet 00 00 00 (noise?)");
-        rx_idx = 0;
-        continue;
-      }
-
-      if (!is_plausible_packet(type, count, conf)) {
-        Serial.printf("[uPesy] Drop implausible: %02X %02X %02X\n", type, count, conf);
-        rx_idx = 0;
-        continue;
-      }
-
-      Serial.printf("[uPesy] RX => type=%u count=%u conf=%u\n", type, count, conf);
-      Serial.printf("[uPesy] HEX => %02X %02X %02X\n", type, count, conf);
-
-      if (!g_joined) {
-        Serial.println("[uPesy] Skip uplink: not joined");
-      } else {
-        loraSend3Bytes(type, count, conf);
-      }
-
-      rx_idx = 0;
-      delay(50);
+    for (int i = 0; i < countToRead; i++) {
+        temp_ds18b20[i] = sensors.getTempCByIndex(i);
+        Serial.print("[DS18B20] [");
+        Serial.print(i);
+        Serial.print("] : ");
+        Serial.print(temp_ds18b20[i]);
+        Serial.println(" °C");
     }
-  }
+
+    for (int i = countToRead; i < maxCount; i++) {
+        temp_ds18b20[i] = NAN;
+    }
+}
+
+void lireADXL(int16_t &x, int16_t &y, int16_t &z) {
+    int ax, ay, az;
+    adxl.readAccel(&ax, &ay, &az);
+
+    x = (int16_t)ax;
+    y = (int16_t)ay;
+    z = (int16_t)az;
+
+    Serial.print("[ADXL] Accel XYZ: ");
+    Serial.print(ax); Serial.print(", ");
+    Serial.print(ay); Serial.print(", ");
+    Serial.println(az);
+}
+
+void lireLux(float &lux_SEN0562) {
+    Wire.beginTransmission(LUX_I2C_ADDR);
+    Wire.write(0x10);
+
+    if (Wire.endTransmission() == 0) {
+        delay(180); // plus sûr pour une mesure BH1750
+        Wire.requestFrom(LUX_I2C_ADDR, 2);
+
+        if (Wire.available() == 2) {
+            uint16_t data = (Wire.read() << 8) | Wire.read();
+            lux_SEN0562 = data / 1.2f;
+            Serial.print("[LUX] Luminosite: ");
+            Serial.print(lux_SEN0562);
+            Serial.println(" lx");
+            return;
+        }
+    }
+
+    lux_SEN0562 = NAN;
+    Serial.println("[LUX] Erreur lecture");
+}
+
+void lireDHT(DHT &dht, float &temp_dht, float &hum_dht) {
+    hum_dht  = dht.readHumidity();
+    temp_dht = dht.readTemperature();
+
+    Serial.print("[DHT] ");
+    if (!isnan(hum_dht) && !isnan(temp_dht)) {
+        Serial.print("Hum ");
+        Serial.print(hum_dht);
+        Serial.print("% | Temp ");
+        Serial.print(temp_dht);
+        Serial.println(" °C");
+    } else {
+        Serial.println("Erreur lecture");
+    }
+}
+
+void lirePoids(float &kg_HX711) {
+    kg_HX711 = scale.get_units(5);
+    if (kg_HX711 < 0 && kg_HX711 > -2) kg_HX711 = 0;
+
+    Serial.print("[HX711] Poids: ");
+    Serial.print(kg_HX711 / 1000.0f, 2);
+    Serial.println(" kg");
+}
+
+void lireNano(uint8_t &audio_classe, uint8_t &audio_conf) {
+    uint8_t nb = Wire.requestFrom((int)NANO_I2C_ADDR, 2);
+
+    if (nb == 2 && Wire.available() >= 2) {
+        audio_classe = Wire.read();
+        audio_conf   = Wire.read();
+
+        last_audio_classe = audio_classe;
+        last_audio_conf   = audio_conf;
+
+        Serial.print("[NANO] classe=");
+        Serial.print(audio_classe);
+        Serial.print(" conf=");
+        Serial.print(audio_conf);
+        Serial.println("%");
+        return;
+    }
+
+    while (Wire.available()) {
+        Wire.read();
+    }
+
+    Serial.println("[NANO] Pas de reponse -> conservation des dernieres valeurs");
+    audio_classe = last_audio_classe;
+    audio_conf   = last_audio_conf;
+}
+
+void lireXIAO(uint8_t &frelon, uint8_t &nb_frelon, uint8_t &frelon_acc) {
+    const uint32_t timeout_ms = 15000;
+    const uint32_t retry_ms   = 500;
+
+    uint32_t t0 = millis();
+
+    while (millis() - t0 < timeout_ms) {
+        int n = Wire.requestFrom((int)XIAO_I2C_ADDR, 3);
+
+        if (n == 3 && Wire.available() >= 3) {
+            frelon     = Wire.read();
+            nb_frelon  = Wire.read();
+            frelon_acc = Wire.read();
+
+            last_frelon     = frelon;
+            last_nb_frelon  = nb_frelon;
+            last_frelon_acc = frelon_acc;
+
+            Serial.print("[XIAO] frelon=");
+            Serial.print(frelon);
+            Serial.print(" nb=");
+            Serial.print(nb_frelon);
+            Serial.print(" conf=");
+            Serial.print(frelon_acc);
+            Serial.println("%");
+            return;
+        }
+
+        while (Wire.available()) {
+            Wire.read();
+        }
+
+        Serial.println("[XIAO] pas pret, nouvelle tentative...");
+        delay(retry_ms);
+    }
+
+    Serial.println("[XIAO] timeout -> conservation des dernieres valeurs");
+    frelon     = last_frelon;
+    nb_frelon  = last_nb_frelon;
+    frelon_acc = last_frelon_acc;
+}
+
+String payloadToHex(const Payload &data) {
+    const uint8_t* pBytes = (const uint8_t*)&data;
+    String hexPayload = "";
+
+    for (size_t i = 0; i < sizeof(Payload); i++) {
+        if (pBytes[i] < 0x10) hexPayload += "0";
+        hexPayload += String(pBytes[i], HEX);
+    }
+
+    hexPayload.toUpperCase();
+    return hexPayload;
+}
+
+void envoyerCommandeAT(const String &cmd) {
+    Serial.print("-> ");
+    Serial.println(cmd);
+
+    Serial2.print(cmd + "\r\n");
+
+    uint32_t t0 = millis();
+    while (millis() - t0 < 2000) {
+        while (Serial2.available()) {
+            Serial.write(Serial2.read());
+        }
+    }
+}
+
+int16_t floatToTemp10(float v) {
+    if (isnan(v)) return 0;
+    return (int16_t)(v * 10.0f);
+}
+
+uint16_t floatToU16(float v) {
+    if (isnan(v) || v < 0.0f) return 0;
+    return (uint16_t)(v);
 }

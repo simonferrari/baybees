@@ -1,18 +1,32 @@
 #include <Arduino.h>
+#include <Wire.h>
 
-#include <BeeGuardAI_Hornet-clone_inferencing.h>
+#include <BeeGuardAI_Hornet_inferencing.h>
 #include "edge-impulse-sdk/dsp/image/image.hpp"
 #include "esp_camera.h"
+#include "esp_heap_caps.h"
 
 // ===============================
-// UART 3 octets vers uPesy
+// I2C slave vers uPesy
 // ===============================
-static const uint32_t LINK_BAUD = 115200;
+static const uint8_t XIAO_I2C_ADDR = 0x12;
 
-// XIAO pins I2C réutilisées en UART
-// SDA = D4, SCL = D5
-static const int UART_RX_GPIO = D4; // optionnel (uPesy TX -> XIAO RX)
-static const int UART_TX_GPIO = D5; // XIAO TX -> uPesy RX (GPIO21)
+// XIAO : D4 = SDA, D5 = SCL
+static const int I2C_SDA_GPIO = D4;
+static const int I2C_SCL_GPIO = D5;
+
+// paquet lu par le maître uPesy
+volatile uint8_t g_type  = 0;
+volatile uint8_t g_count = 0;
+volatile uint8_t g_conf  = 0;
+
+// mémorisation de la dernière détection utile
+static uint8_t last_type  = 0;
+static uint8_t last_count = 0;
+static uint8_t last_conf  = 0;
+
+static unsigned long last_detect_ms = 0;
+static const unsigned long HOLD_MS = 5000; // garde la dernière détection 5 s
 
 static inline uint8_t clamp_u8(int v, int lo, int hi) {
   if (v < lo) return (uint8_t)lo;
@@ -20,9 +34,10 @@ static inline uint8_t clamp_u8(int v, int lo, int hi) {
   return (uint8_t)v;
 }
 
-static void send_packet_3(uint8_t type, uint8_t count, uint8_t conf) {
-  uint8_t pkt[3] = { type, count, conf };
-  Serial1.write(pkt, 3);
+void onI2CRequest() {
+  Wire.write((uint8_t)g_type);
+  Wire.write((uint8_t)g_count);
+  Wire.write((uint8_t)g_conf);
 }
 
 // ===============================
@@ -32,8 +47,8 @@ static void send_packet_3(uint8_t type, uint8_t count, uint8_t conf) {
 #define RESET_GPIO_NUM   -1
 
 #define XCLK_GPIO_NUM    10
-#define SIOD_GPIO_NUM    40   // CAM_SDA
-#define SIOC_GPIO_NUM    39   // CAM_SCL
+#define SIOD_GPIO_NUM    40
+#define SIOC_GPIO_NUM    39
 
 #define Y9_GPIO_NUM      48
 #define Y8_GPIO_NUM      11
@@ -54,6 +69,11 @@ static void send_packet_3(uint8_t type, uint8_t count, uint8_t conf) {
 
 static bool debug_nn = false;
 static bool is_initialised = false;
+
+// gros buffer RGB caméra en PSRAM
+static uint8_t* camera_rgb_buf = nullptr;
+
+// buffer entrée EI en RAM interne
 static uint8_t* snapshot_buf = nullptr;
 
 static camera_config_t camera_config = {
@@ -93,35 +113,58 @@ static int  ei_camera_get_data(size_t offset, size_t length, float *out_ptr);
 
 void setup() {
   Serial.begin(115200);
-  delay(300);
+  delay(500);
 
-  // UART vers uPesy sur D4/D5
-  Serial1.begin(LINK_BAUD, SERIAL_8N1, UART_RX_GPIO, UART_TX_GPIO);
-  Serial.printf("[XIAO] Serial1 UART on D4/D5 -> TX=D5(%d) RX=D4(%d) @%lu\n",
-                (int)UART_TX_GPIO, (int)UART_RX_GPIO, (unsigned long)LINK_BAUD);
+  Serial.println();
+  Serial.println("[XIAO] Boot");
 
+  // I2C slave
+  if (!Wire.begin((uint8_t)XIAO_I2C_ADDR, I2C_SDA_GPIO, I2C_SCL_GPIO, 100000)) {
+    Serial.println("[XIAO] ERREUR: Wire.begin(slave) a echoue");
+    while (1) delay(1000);
+  }
+  Wire.onRequest(onI2CRequest);
+
+  Serial.printf("[XIAO] I2C slave pret addr=0x%02X SDA=D4(%d) SCL=D5(%d)\n",
+                XIAO_I2C_ADDR, I2C_SDA_GPIO, I2C_SCL_GPIO);
+
+  // camera
   Serial.println("[XIAO] Init camera...");
   if (!ei_camera_init()) {
-    ei_printf("Failed to initialize camera!\r\n");
+    Serial.println("[XIAO] Failed to initialize camera!");
     while (1) delay(1000);
   }
-  ei_printf("Camera initialized\r\n");
+  Serial.println("[XIAO] Camera initialized");
 
-  snapshot_buf = (uint8_t*)malloc(EI_CAMERA_RAW_FRAME_BUFFER_COLS *
-                                  EI_CAMERA_RAW_FRAME_BUFFER_ROWS *
-                                  EI_CAMERA_FRAME_BYTE_SIZE);//3 octets par pixel
-  if (!snapshot_buf) {
-    ei_printf("ERR: Failed to allocate snapshot buffer!\n");
+  // buffer RGB 320x240x3 en PSRAM
+  camera_rgb_buf = (uint8_t*)ps_malloc(
+      EI_CAMERA_RAW_FRAME_BUFFER_COLS *
+      EI_CAMERA_RAW_FRAME_BUFFER_ROWS *
+      EI_CAMERA_FRAME_BYTE_SIZE);
+
+  // buffer EI en RAM interne
+  snapshot_buf = (uint8_t*)heap_caps_malloc(
+      EI_CLASSIFIER_INPUT_WIDTH *
+      EI_CLASSIFIER_INPUT_HEIGHT *
+      EI_CAMERA_FRAME_BYTE_SIZE,
+      MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+
+  if (!camera_rgb_buf || !snapshot_buf) {
+    Serial.println("[XIAO] ERR: Failed to allocate buffers!");
     while (1) delay(1000);
   }
 
-  ei_printf("\nStarting continuous inference...\n");
-  ei_sleep(1000);
+  Serial.printf("[XIAO] EI input = %dx%d\n",
+                EI_CLASSIFIER_INPUT_WIDTH,
+                EI_CLASSIFIER_INPUT_HEIGHT);
+  Serial.printf("[XIAO] camera_rgb_buf=%p snapshot_buf=%p\n",
+                camera_rgb_buf, snapshot_buf);
+
+  Serial.println("[XIAO] Starting continuous inference...");
+  delay(1000);
 }
 
 void loop() {
-  if (ei_sleep(10) != EI_IMPULSE_OK) return;
-
   ei::signal_t signal;
   signal.total_length = EI_CLASSIFIER_INPUT_WIDTH * EI_CLASSIFIER_INPUT_HEIGHT;
   signal.get_data = &ei_camera_get_data;
@@ -129,14 +172,17 @@ void loop() {
   if (!ei_camera_capture((uint32_t)EI_CLASSIFIER_INPUT_WIDTH,
                          (uint32_t)EI_CLASSIFIER_INPUT_HEIGHT,
                          snapshot_buf)) {
-    ei_printf("Failed to capture image\r\n");
+    Serial.println("[XIAO] Failed to capture image");
+    delay(200);
     return;
   }
 
   ei_impulse_result_t result = {0};
+
   EI_IMPULSE_ERROR err = run_classifier(&signal, &result, debug_nn);
   if (err != EI_IMPULSE_OK) {
-    ei_printf("ERR: run_classifier (%d)\n", err);
+    Serial.printf("[XIAO] ERR: run_classifier (%d)\n", err);
+    delay(200);
     return;
   }
 
@@ -146,12 +192,14 @@ void loop() {
   const float TH = 0.50f;
   int hornet_count = 0;
   float best = 0.0f;
+
   for (uint32_t i = 0; i < result.bounding_boxes_count; i++) {
     auto bb = result.bounding_boxes[i];
     if (bb.value == 0) continue;
+
     if (strcasecmp(bb.label, "Hornet") == 0) {
-      if (bb.value >= TH) hornet_count++; // nombre
-      if (bb.value > best) best = bb.value;//confiance
+      if (bb.value >= TH) hornet_count++;
+      if (bb.value > best) best = bb.value;
     }
   }
 
@@ -174,9 +222,30 @@ void loop() {
   conf  = clamp_u8((int)(hornet_p * 100.0f + 0.5f), 0, 100);
 #endif
 
-  send_packet_3(type, count, conf);
+  // --------------------------------------------------
+  // SOLUTION 1 : garder la dernière détection utile
+  // --------------------------------------------------
+  if (type == 1) {
+    last_type  = type;
+    last_count = count;
+    last_conf  = conf;
+    last_detect_ms = millis();
+  }
 
-  Serial.printf("[XIAO] Sent 3B => type=%u count=%u conf=%u\n", type, count, conf);
+  if ((millis() - last_detect_ms) < HOLD_MS) {
+    g_type  = last_type;
+    g_count = last_count;
+    g_conf  = last_conf;
+  } else {
+    g_type  = 0;
+    g_count = 0;
+    g_conf  = 0;
+  }
+
+  Serial.printf("[XIAO] raw => type=%u count=%u conf=%u | held => type=%u count=%u conf=%u\n",
+                type, count, conf, g_type, g_count, g_conf);
+
+  delay(100);
 }
 
 static bool ei_camera_init(void) {
@@ -184,7 +253,7 @@ static bool ei_camera_init(void) {
 
   esp_err_t err = esp_camera_init(&camera_config);
   if (err != ESP_OK) {
-    Serial.printf("Camera init failed 0x%x\n", err);
+    Serial.printf("[XIAO] Camera init failed 0x%x\n", err);
     return false;
   }
 
@@ -206,33 +275,40 @@ static bool ei_camera_capture(uint32_t img_width, uint32_t img_height, uint8_t* 
   camera_fb_t* fb = esp_camera_fb_get();
   if (!fb) return false;
 
-  bool ok = fmt2rgb888(fb->buf, fb->len, PIXFORMAT_JPEG, out_buf);
+  bool ok = fmt2rgb888(fb->buf, fb->len, PIXFORMAT_JPEG, camera_rgb_buf);
   esp_camera_fb_return(fb);
   if (!ok) return false;
 
   if (img_width != EI_CAMERA_RAW_FRAME_BUFFER_COLS ||
       img_height != EI_CAMERA_RAW_FRAME_BUFFER_ROWS) {
     ei::image::processing::crop_and_interpolate_rgb888(
-      out_buf,
+      camera_rgb_buf,
       EI_CAMERA_RAW_FRAME_BUFFER_COLS,
       EI_CAMERA_RAW_FRAME_BUFFER_ROWS,
       out_buf,
       img_width,
       img_height
     );
+  } else {
+    memcpy(out_buf,
+           camera_rgb_buf,
+           img_width * img_height * EI_CAMERA_FRAME_BYTE_SIZE);
   }
+
   return true;
 }
 
 static int ei_camera_get_data(size_t offset, size_t length, float *out_ptr) {
   size_t pixel_ix = offset * 3;
+
   for (size_t i = 0; i < length; i++) {
-    uint8_t r = snapshot_buf[pixel_ix + 0];
-    uint8_t g = snapshot_buf[pixel_ix + 1];
-    uint8_t b = snapshot_buf[pixel_ix + 2];
+    uint32_t r = snapshot_buf[pixel_ix + 0];
+    uint32_t g = snapshot_buf[pixel_ix + 1];
+    uint32_t b = snapshot_buf[pixel_ix + 2];
     out_ptr[i] = (float)((r << 16) | (g << 8) | b);
     pixel_ix += 3;
   }
+
   return 0;
 }
 
